@@ -1,0 +1,100 @@
+name: Rails CI
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+  schedule:
+    - cron: "0 3 * * *"   # nightly run (UTC)
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        ports: ["5432:5432"]
+        env:
+          POSTGRES_DB: rails_test
+          POSTGRES_USER: rails
+          POSTGRES_PASSWORD: password
+        options: >-
+          --health-cmd="pg_isready -U rails"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      RAILS_ENV: test
+      DATABASE_URL: postgres://rails:password@localhost:5432/rails_test
+      BUNDLE_JOBS: 4
+      BUNDLE_RETRY: 3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - name: Wait for Postgres
+        run: |
+          until pg_isready -h localhost -U rails; do
+            echo "waiting for postgres"
+            sleep 2
+          done
+
+      - name: Setup DB
+        run: |
+          bin/rails db:prepare
+
+      - name: Run tests
+        run: bundle exec rspec || bundle exec rake
+
+      - name: Upload coverage (optional)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - name: Generate binstubs
+        run: bundle binstubs bundler-audit brakeman rubocop
+
+      - name: Audit gems
+        run: bin/bundler-audit --update
+
+      - name: Brakeman scan
+        run: bin/brakeman -q -w2
+
+      - name: Rubocop
+        run: bin/rubocop --parallel
+
+  nightly-replay:
+    name: Nightly ledger replay
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run replay script
+        run: |
+          echo "Running daily transaction replay"
+          ruby scripts/replay.rb
